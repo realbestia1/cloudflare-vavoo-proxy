@@ -1,0 +1,25 @@
+COME CREARE IL TOKEN CORRETTO
+
+I modelli che vedi non vanno bene. Devi creare un "Token Personalizzato". Ecco come fare:
+
+1. Torna alla pagina dei token: https://dash.cloudflare.com/profile/api-tokens
+2. Clicca su "Create Token".
+3. Scorri in fondo alla pagina. Vedrai una sezione chiamata "Custom Token" (o Token Personalizzato). Clicca sul bottone "Get started" (o Inizia) lì vicino.
+
+4. Ora configura così:
+   - Token name: scrivi "IPv4 Fix"
+   
+   - Permissions (Permessi):
+     * Casetta 1: Scegli "Zone" (Zona)
+     * Casetta 2: Scegli "Zone Settings" (Impostazioni Zona)
+     * Casetta 3: Scegli "Edit" (Modifica)
+
+   - Zone Resources (Risorse Zona):
+     * Include
+     * Specific zone
+     * Seleziona il tuo sito
+
+5. Clicca su "Continue to summary" (o Continua).
+6. Clicca su "Create Token".
+
+7. Copia quel codice lunghissimo e incollalo nel file `disable_ipv6.js`.
