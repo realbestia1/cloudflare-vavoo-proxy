@@ -18,16 +18,62 @@ const CORS_HEADERS = {
 };
 
 function getClientIP(request) {
-  // Check explicit ip query parameter first (sent by backend servers that know the real client IP)
   try {
       const url = new URL(request.url);
       const explicitIp = url.searchParams.get('ip');
       if (explicitIp && explicitIp.trim()) return explicitIp.trim();
   } catch {}
-  return request.headers.get('CF-Connecting-IP') ||
-      request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
-      request.headers.get('X-Real-IP') ||
-      '127.0.0.1';
+
+  const isPrivate = (ip) => {
+      if (!ip) return true;
+      const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+      if (m) {
+          const a = parseInt(m[1], 10);
+          if (a === 10 || a === 127) return true;
+          if (a === 172 && parseInt(m[2], 10) >= 16 && parseInt(m[2], 10) <= 31) return true;
+          if (a === 192 && parseInt(m[2], 10) === 168) return true;
+          if (a === 169 && parseInt(m[2], 10) === 254) return true;
+          return false;
+      }
+      const low = ip.toLowerCase();
+      if (low === '::1' || low.startsWith('fc') || low.startsWith('fd') || low.startsWith('fe80:')) return true;
+      return false;
+  };
+  const normalize = (raw) => {
+      if (!raw) return '';
+      let ip = raw.trim();
+      if (ip.startsWith('[') && ip.endsWith(']')) ip = ip.slice(1, -1);
+      const mapped = ip.match(/::ffff:(\d+\.\d+\.\d+\.\d+)/i);
+      if (mapped) ip = mapped[1];
+      return ip;
+  };
+  const pickFirstPublic = (candidates) => {
+      for (const raw of candidates) {
+          const ip = normalize(raw);
+          if (ip && !isPrivate(ip)) return ip;
+      }
+      for (const raw of candidates) {
+          const ip = normalize(raw);
+          if (ip) return ip;
+      }
+      return null;
+  };
+
+  const xff = request.headers.get('X-Forwarded-For');
+  if (xff) {
+      const list = xff.split(',').map(s => s.trim()).filter(Boolean);
+      const got = pickFirstPublic(list);
+      if (got) return got;
+  }
+  const directHeaders = ['CF-Connecting-IP', 'True-Client-IP', 'X-Real-IP', 'X-Client-IP', 'Fly-Client-IP', 'Fastly-Client-IP'];
+  for (const h of directHeaders) {
+      const val = request.headers.get(h);
+      if (val) {
+          const ip = normalize(val);
+          if (ip) return ip;
+      }
+  }
+  return null;
 }
 
 class ExtractorError extends Error {
@@ -41,17 +87,18 @@ class ExtractorError extends Error {
 
 class VavooExtractor {
   async getAuthSignature(clientIP) {
-      const currentTime = Date.now();
-      const authPayload = {
-          token: "",
-          reason: "app-focus",
-          locale: "de",
-          theme: "dark",
+      const uniqueId = Math.random().toString(16).slice(2, 18);
+      const nowMs = Date.now();
+      const pingBody = {
+          token: '',
+          reason: 'app-focus',
+          locale: 'de',
+          theme: 'dark',
           metadata: {
-              device: { type: "phone", uniqueId: "vypn-test" },
-              os: { name: "android", version: "14", abis: ["arm64-v8a"], host: "android" },
-              app: { platform: "android" },
-              version: { package: "net.vypn.app", binary: "1.4.1", js: "1.4.1" }
+              device: { type: 'phone', uniqueId },
+              os: { name: 'android', version: '14', abis: ['arm64-v8a'], host: 'android' },
+              app: { platform: 'android' },
+              version: { package: 'net.vypn.app', binary: '1.4.1', js: '1.4.1' }
           },
           appFocusTime: 0,
           playerActive: false,
@@ -59,43 +106,67 @@ class VavooExtractor {
           devMode: false,
           hasAddon: true,
           castConnected: false,
-          package: "net.vypn.app",
-          version: "1.4.1",
-          process: "app",
-          firstAppStart: currentTime - 86400000,
-          lastAppStart: currentTime,
-          ipLocation: null,
+          package: 'net.vypn.app',
+          version: '1.4.1',
+          process: 'app',
+          firstAppStart: nowMs - 86400000,
+          lastAppStart: nowMs,
+          ipLocation: clientIP || null,
           adblockEnabled: true,
           migrationApplied: false,
           migrationTargetInstalled: false,
-          proxy: {
-              supported: ["ss"],
-              engine: "Mu",
-              ssVersion: "2022",
-              enabled: false,
-              autoServer: true,
-              id: ""
-          },
-          iap: { supported: false, error: "" }
+          proxy: { supported: ['ss'], engine: 'Mu', ssVersion: '2022', enabled: false, autoServer: true, id: '' },
+          iap: { supported: false, error: '' }
       };
-      const authHeaders = {
-          "user-agent": "okhttp/4.11.0",
-          "accept": "application/json",
-          "content-type": "application/json; charset=utf-8",
-          "accept-encoding": "gzip",
+      const pingHeaders = {
+          'user-agent': 'electron-fetch/1.0 electron (+https://github.com/arantes555/electron-fetch)',
+          'accept': 'application/json',
+          'content-type': 'application/json; charset=utf-8',
+          'accept-encoding': 'gzip',
+          'Accept-Language': 'de'
       };
-      const response = await fetch("https://www.vypn.net/api/app/ping", {
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify(authPayload)
+      if (clientIP) {
+          pingHeaders['X-Forwarded-For'] = clientIP;
+          pingHeaders['X-Real-IP'] = clientIP;
+      }
+
+      let addonSig = null;
+
+      // Primo tentativo con client IP
+      let res = await fetch('https://www.vypn.net/api/app/ping', {
+          method: 'POST',
+          headers: pingHeaders,
+          body: JSON.stringify(pingBody)
       });
-      if (!response.ok) throw new ExtractorError(`Vavoo Auth API failed: ${response.status}`);
-      const result = await response.json();
-      const sig = result.addonSig || result.mhub;
-      if (!sig) throw new ExtractorError('Vavoo auth response missing addonSig.');
+      if (res.ok) {
+          const j = await res.json();
+          addonSig = j?.addonSig || j?.mhub || null;
+      }
+
+      // Fallback: se fallisce con IP client, riprova senza
+      if (!addonSig) {
+          const fbBody = { ...pingBody, ipLocation: null };
+          const fbHeaders = {
+              'user-agent': 'electron-fetch/1.0 electron (+https://github.com/arantes555/electron-fetch)',
+              'accept': 'application/json',
+              'content-type': 'application/json; charset=utf-8',
+              'accept-encoding': 'gzip',
+              'Accept-Language': 'de'
+          };
+          res = await fetch('https://www.vypn.net/api/app/ping', {
+              method: 'POST',
+              headers: fbHeaders,
+              body: JSON.stringify(fbBody)
+          });
+          if (res.ok) {
+              const j = await res.json();
+              addonSig = j?.addonSig || j?.mhub || null;
+          }
+      }
+
+      if (!addonSig) throw new ExtractorError('Vavoo Auth API failed: no addonSig after retry');
 
       // Rewrite IPs in addonSig to use client IP
-      let addonSig = sig;
       try {
           const decoded = atob(addonSig);
           const sigObj = JSON.parse(decoded);
@@ -127,9 +198,11 @@ class VavooExtractor {
           "content-type": "application/json; charset=utf-8",
           "accept-encoding": "gzip",
           "mediahubmx-signature": signature,
-          "X-Forwarded-For": clientIP,
-          "X-Real-IP": clientIP,
       };
+      if (clientIP) {
+          resolveHeaders["X-Forwarded-For"] = clientIP;
+          resolveHeaders["X-Real-IP"] = clientIP;
+      }
       const response = await fetch("https://vavoo.to/mediahubmx-resolve.json", {
           method: "POST",
           headers: resolveHeaders,
@@ -160,8 +233,7 @@ class VavooExtractor {
       const signature = await this.getAuthSignature(clientIP);
       const streamUrl = await this.resolveStream(url, signature, clientIP);
 
-      // Workaround: il CDN finale di Vavoo ha cert SSL scaduto (Apr 23 2026).
-      // Forziamo HTTP, il CDN risponde anche in cleartext.
+      // Workaround: CDN Vavoo ha cert SSL scaduto, forziamo HTTP
       const finalUrl = streamUrl.replace(/^https:\/\//, 'http://');
 
       return new Response(null, {
@@ -333,7 +405,7 @@ function handleStatus(request) {
           ip: clientIP,
           country: request.headers.get('CF-IPCountry') || 'unknown',
           user_agent: request.headers.get('User-Agent') || 'unknown',
-          is_ipv6: clientIP.includes(':'),
+          is_ipv6: clientIP ? clientIP.includes(':') : false,
       },
       supported_services: {
           vavoo: { mode: "redirect", path: "/manifest.m3u8?url=https://vavoo.to/..." },
@@ -368,7 +440,6 @@ export default {
           if (url.pathname === '/playlist') {
               return await handlePlaylistProxy(request);
           }
-
           if (url.pathname === '/manifest.m3u8') {
               if (url.searchParams.has('url')) {
                   const targetUrl = url.searchParams.get('url');
