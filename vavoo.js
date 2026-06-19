@@ -327,7 +327,7 @@ function handleInfoPage(request) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>?? Vavoo Stream Extractor</title>
+  <title>Vavoo Stream Extractor</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
       :root {
@@ -355,7 +355,7 @@ function handleInfoPage(request) {
 <body>
   <div class="container">
       <header class="header">
-          <h1>?? Vavoo Stream Extractor</h1>
+          <h1>Vavoo Stream Extractor</h1>
           <div class="version-badge">
               <span>v1.0</span>
               <span class="status-badge">ONLINE</span>
@@ -369,7 +369,7 @@ function handleInfoPage(request) {
               <h3 class="card-title">Estrazione Stream</h3>
               <p class="card-description">
                   Fornisci un URL Vavoo per ottenere un redirect (302) diretto allo stream finale.<br>
-                  <span class="warning">?? Nota:</span> Se gli stream non partono, disattiva IPv6 sulla tua connessione.
+                  <span class="warning">Nota:</span> Se gli stream non partono, disattiva IPv6 sulla tua connessione.
               </p>
               <div class="endpoint-code">${workerDomain}/manifest.m3u8?url=&lt;VAVOO_URL&gt;</div>
           </div>
