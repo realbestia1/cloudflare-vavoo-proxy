@@ -86,123 +86,27 @@ class ExtractorError extends Error {
 // --- Vavoo Extractor Logic ---
 
 class VavooExtractor {
-  async getAuthSignature(clientIP) {
-      const uniqueId = Math.random().toString(16).slice(2, 18);
-      const nowMs = Date.now();
-      const pingBody = {
-          token: '',
-          reason: 'app-focus',
-          locale: 'de',
-          theme: 'dark',
-          metadata: {
-              device: { type: 'phone', uniqueId },
-              os: { name: 'android', version: '14', abis: ['arm64-v8a'], host: 'android' },
-              app: { platform: 'android' },
-              version: { package: 'net.vypn.app', binary: '1.4.1', js: '1.4.1' }
-          },
-          appFocusTime: 0,
-          playerActive: false,
-          playDuration: 0,
-          devMode: false,
-          hasAddon: true,
-          castConnected: false,
-          package: 'net.vypn.app',
-          version: '1.4.1',
-          process: 'app',
-          firstAppStart: nowMs - 86400000,
-          lastAppStart: nowMs,
-          ipLocation: clientIP || null,
-          adblockEnabled: true,
-          migrationApplied: false,
-          migrationTargetInstalled: false,
-          proxy: { supported: ['ss'], engine: 'Mu', ssVersion: '2022', enabled: false, autoServer: true, id: '' },
-          iap: { supported: false, error: '' }
-      };
-      const pingHeaders = {
-          'user-agent': 'electron-fetch/1.0 electron (+https://github.com/arantes555/electron-fetch)',
-          'accept': 'application/json',
-          'content-type': 'application/json; charset=utf-8',
-          'accept-encoding': 'gzip',
-          'Accept-Language': 'de'
-      };
-      if (clientIP) {
-          pingHeaders['X-Forwarded-For'] = clientIP;
-          pingHeaders['X-Real-IP'] = clientIP;
+  _normalizeUrl(url) {
+      if (url.includes('/watch')) {
+          const parsed = new URL(url);
+          const liveId = parsed.searchParams.get('live');
+          if (liveId) return `https://vavoo.to/vavoo-iptv/play/${liveId}`;
       }
-
-      let addonSig = null;
-
-      // Primo tentativo con client IP
-      let res = await fetch('https://www.vypn.net/api/app/ping', {
-          method: 'POST',
-          headers: pingHeaders,
-          body: JSON.stringify(pingBody)
-      });
-      if (res.ok) {
-          const j = await res.json();
-          addonSig = j?.addonSig || j?.mhub || null;
-      }
-
-      // Fallback: se fallisce con IP client, riprova senza
-      if (!addonSig) {
-          const fbBody = { ...pingBody, ipLocation: null };
-          const fbHeaders = {
-              'user-agent': 'electron-fetch/1.0 electron (+https://github.com/arantes555/electron-fetch)',
-              'accept': 'application/json',
-              'content-type': 'application/json; charset=utf-8',
-              'accept-encoding': 'gzip',
-              'Accept-Language': 'de'
-          };
-          res = await fetch('https://www.vypn.net/api/app/ping', {
-              method: 'POST',
-              headers: fbHeaders,
-              body: JSON.stringify(fbBody)
-          });
-          if (res.ok) {
-              const j = await res.json();
-              addonSig = j?.addonSig || j?.mhub || null;
-          }
-      }
-
-      if (!addonSig) throw new ExtractorError('Vavoo Auth API failed: no addonSig after retry');
-
-      // Rewrite IPs in addonSig to use client IP
-      try {
-          const decoded = atob(addonSig);
-          const sigObj = JSON.parse(decoded);
-          if (sigObj && sigObj.data) {
-              const dataObj = JSON.parse(sigObj.data);
-              if (clientIP) {
-                  const currentIps = Array.isArray(dataObj.ips) ? dataObj.ips : [];
-                  dataObj.ips = [clientIP, ...currentIps.filter(x => x && x !== clientIP)];
-                  if (typeof dataObj.ip === 'string') dataObj.ip = clientIP;
-                  sigObj.data = JSON.stringify(dataObj);
-                  addonSig = btoa(JSON.stringify(sigObj));
-              }
-          }
-      } catch (e) { /* keep original sig if rewrite fails */ }
-
-      return addonSig;
+      const m = url.match(/\/play\/([^/?#]+)/);
+      if (m) return `https://vavoo.to/vavoo-iptv/play/${m[1]}`;
+      return url;
   }
 
-  async resolveStream(vavooUrl, signature, clientIP) {
-      const resolvePayload = {
-          language: "de",
-          region: "AT",
-          url: vavooUrl,
-          clientVersion: "3.0.2"
-      };
+  async resolveStream(vavooUrl) {
+      const normalizedUrl = this._normalizeUrl(vavooUrl);
+      const resolvePayload = { language: "de", region: "DE", url: normalizedUrl };
       const resolveHeaders = {
-          "user-agent": "MediaHubMX/2",
-          "accept": "application/json",
-          "content-type": "application/json; charset=utf-8",
-          "accept-encoding": "gzip",
-          "mediahubmx-signature": signature,
+          "Origin": "https://vavoo.to",
+          "Referer": "https://vavoo.to/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+          "Accept": "application/json",
+          "Content-Type": "application/json; charset=utf-8",
       };
-      if (clientIP) {
-          resolveHeaders["X-Forwarded-For"] = clientIP;
-          resolveHeaders["X-Real-IP"] = clientIP;
-      }
       const response = await fetch("https://vavoo.to/mediahubmx-resolve.json", {
           method: "POST",
           headers: resolveHeaders,
@@ -212,47 +116,18 @@ class VavooExtractor {
       const result = await response.json();
       let streamUrl;
       if (Array.isArray(result)) {
-          // Try to find an HTTPS stream first
           const httpsStream = result.find(item => item.url && item.url.startsWith('https://'));
           streamUrl = httpsStream ? httpsStream.url : result[0]?.url;
       } else {
           streamUrl = result?.url;
       }
-
       if (!streamUrl) throw new ExtractorError('Vavoo resolve response contains no valid stream URL.');
-
       return streamUrl;
   }
 
   async handle(url, request) {
-      const clientIP = getClientIP(request);
-      if (clientIP && clientIP.includes(':')) {
-          return new Response('IPv6 connections are not allowed for this service.', { status: 403, headers: CORS_HEADERS });
-      }
-
-      const signature = await this.getAuthSignature(clientIP);
-      let streamUrl;
-      try {
-          streamUrl = await this.resolveStream(url, signature, clientIP);
-      } catch (e) {
-          // If resolve failed on a /watch link, extract live token and retry with /play/TOKEN
-          if (url.includes('/watch')) {
-              const parsed = new URL(url);
-              const liveId = parsed.searchParams.get('live');
-              if (liveId) {
-                  const playUrl = `https://vavoo.to/vavoo-iptv/play/${liveId}`;
-                  streamUrl = await this.resolveStream(playUrl, signature, clientIP);
-              } else {
-                  throw e;
-              }
-          } else {
-              throw e;
-          }
-      }
-
-      // Workaround: CDN Vavoo ha cert SSL scaduto, forziamo HTTP
+      const streamUrl = await this.resolveStream(url);
       const finalUrl = streamUrl.replace(/^https:\/\//, 'http://');
-
       return new Response(null, {
           status: 302,
           headers: { ...CORS_HEADERS, 'Location': finalUrl },
