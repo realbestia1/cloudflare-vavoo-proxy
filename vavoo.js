@@ -224,25 +224,6 @@ class VavooExtractor {
       return streamUrl;
   }
 
-  async resolveWatchPage(vavooUrl) {
-      if (!vavooUrl.includes('/watch')) return null;
-      const headers = {
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'accept': 'text/html',
-      };
-      try {
-          const res = await fetch(vavooUrl, { headers });
-          if (res.ok) {
-              const text = await res.text();
-              const match = text.match(/\/play\/([a-zA-Z0-9]+)/);
-              if (match) return `https://vavoo.to/play/${match[1]}`;
-          }
-      } catch (e) {
-          console.error(`Failed to resolve watch page: ${e.message}`);
-      }
-      return null;
-  }
-
   async handle(url, request) {
       const clientIP = getClientIP(request);
       if (clientIP && clientIP.includes(':')) {
@@ -254,9 +235,12 @@ class VavooExtractor {
       try {
           streamUrl = await this.resolveStream(url, signature, clientIP);
       } catch (e) {
+          // If resolve failed on a /watch link, extract live token and retry with /play/TOKEN
           if (url.includes('/watch')) {
-              const playUrl = await this.resolveWatchPage(url);
-              if (playUrl) {
+              const parsed = new URL(url);
+              const liveId = parsed.searchParams.get('live');
+              if (liveId) {
+                  const playUrl = `https://vavoo.to/vavoo-iptv/play/${liveId}`;
                   streamUrl = await this.resolveStream(playUrl, signature, clientIP);
               } else {
                   throw e;
