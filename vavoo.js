@@ -224,6 +224,25 @@ class VavooExtractor {
       return streamUrl;
   }
 
+  async resolveWatchPage(vavooUrl) {
+      if (!vavooUrl.includes('/watch')) return null;
+      const headers = {
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'accept': 'text/html',
+      };
+      try {
+          const res = await fetch(vavooUrl, { headers });
+          if (res.ok) {
+              const text = await res.text();
+              const match = text.match(/\/play\/([a-zA-Z0-9]+)/);
+              if (match) return `https://vavoo.to/play/${match[1]}`;
+          }
+      } catch (e) {
+          console.error(`Failed to resolve watch page: ${e.message}`);
+      }
+      return null;
+  }
+
   async handle(url, request) {
       const clientIP = getClientIP(request);
       if (clientIP && clientIP.includes(':')) {
@@ -231,7 +250,21 @@ class VavooExtractor {
       }
 
       const signature = await this.getAuthSignature(clientIP);
-      const streamUrl = await this.resolveStream(url, signature, clientIP);
+      let streamUrl;
+      try {
+          streamUrl = await this.resolveStream(url, signature, clientIP);
+      } catch (e) {
+          if (url.includes('/watch')) {
+              const playUrl = await this.resolveWatchPage(url);
+              if (playUrl) {
+                  streamUrl = await this.resolveStream(playUrl, signature, clientIP);
+              } else {
+                  throw e;
+              }
+          } else {
+              throw e;
+          }
+      }
 
       // Workaround: CDN Vavoo ha cert SSL scaduto, forziamo HTTP
       const finalUrl = streamUrl.replace(/^https:\/\//, 'http://');
@@ -327,7 +360,7 @@ function handleInfoPage(request) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Vavoo Stream Extractor</title>
+  <title>?? Vavoo Stream Extractor</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
       :root {
@@ -355,7 +388,7 @@ function handleInfoPage(request) {
 <body>
   <div class="container">
       <header class="header">
-          <h1>Vavoo Stream Extractor</h1>
+          <h1>?? Vavoo Stream Extractor</h1>
           <div class="version-badge">
               <span>v1.0</span>
               <span class="status-badge">ONLINE</span>
@@ -369,7 +402,7 @@ function handleInfoPage(request) {
               <h3 class="card-title">Estrazione Stream</h3>
               <p class="card-description">
                   Fornisci un URL Vavoo per ottenere un redirect (302) diretto allo stream finale.<br>
-                  <span class="warning">Nota:</span> Se gli stream non partono, disattiva IPv6 sulla tua connessione.
+                  <span class="warning">?? Nota:</span> Se gli stream non partono, disattiva IPv6 sulla tua connessione.
               </p>
               <div class="endpoint-code">${workerDomain}/manifest.m3u8?url=&lt;VAVOO_URL&gt;</div>
           </div>
