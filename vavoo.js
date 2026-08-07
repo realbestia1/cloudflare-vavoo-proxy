@@ -85,6 +85,107 @@ class ExtractorError extends Error {
 
 // --- Vavoo Extractor Logic ---
 
+const PING_URLS = [
+  "https://www.vavoo.tv/api/app/ping",
+  "https://www.vypn.net/api/app/ping",
+];
+const VYPN_PACKAGE = "net.vypn.app";
+const VYPN_VERSION = "1.4.1";
+const BASE_SITES = ["https://vavoo.to", "https://kool.to"];
+const VAVOO_LANGUAGE = "de";
+const VAVOO_REGION = "DE";
+
+function base64UrlDecode(str) {
+  const pad = str.length % 4;
+  const padded = str + (pad ? '='.repeat(4 - pad) : '');
+  const bin = atob(padded);
+  return decodeURIComponent([...bin].map(c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')).join(''));
+}
+
+function base64UrlEncode(str) {
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function rewriteAddonSigIp(sig, clientIp) {
+  try {
+      const decoded = base64UrlDecode(sig);
+      const sigObj = JSON.parse(decoded);
+      if (!sigObj || typeof sigObj !== 'object' || !sigObj.data) return sig;
+      const dataObj = JSON.parse(sigObj.data);
+      const currentIps = Array.isArray(dataObj.ips) ? dataObj.ips : [];
+      dataObj.ips = [clientIp, ...currentIps.filter(ip => ip && ip !== clientIp)];
+      if (typeof dataObj.ip === 'string') dataObj.ip = clientIp;
+      sigObj.data = JSON.stringify(dataObj);
+      return base64UrlEncode(JSON.stringify(sigObj));
+  } catch (e) {
+      console.warn(`[Vavoo] addonSig IP rewrite failed, keeping original sig: ${e.message}`);
+      return sig;
+  }
+}
+
+function buildPingPayload() {
+  const ts = Date.now();
+  return JSON.stringify({
+      token: "",
+      reason: "app-focus",
+      locale: VAVOO_LANGUAGE,
+      theme: "dark",
+      metadata: {
+          device: { type: "phone", uniqueId: crypto.randomUUID() },
+          os: { name: "android", version: "14", abis: ["arm64-v8a"], host: "android" },
+          app: { platform: "android" },
+          version: { package: VYPN_PACKAGE, binary: VYPN_VERSION, js: VYPN_VERSION },
+      },
+      appFocusTime: 0,
+      playerActive: false,
+      playDuration: 0,
+      devMode: false,
+      hasAddon: true,
+      castConnected: false,
+      package: VYPN_PACKAGE,
+      version: VYPN_VERSION,
+      process: "app",
+      firstAppStart: ts - 86400000,
+      lastAppStart: ts,
+      ipLocation: null,
+      adblockEnabled: true,
+      migrationApplied: false,
+      migrationTargetInstalled: false,
+      proxy: { supported: ["ss"], engine: "Mu", ssVersion: "2022", enabled: false, autoServer: true, id: "" },
+      iap: { supported: false, error: "" },
+  });
+}
+
+async function fetchAddonSig(clientIp) {
+  const pingHeaders = {
+      "user-agent": "okhttp/4.11.0",
+      "accept": "application/json",
+      "content-type": "application/json; charset=utf-8",
+  };
+  for (const url of PING_URLS) {
+      try {
+          const resp = await fetch(url, {
+              method: "POST",
+              headers: pingHeaders,
+              body: buildPingPayload(),
+          });
+          if (!resp.ok) {
+              console.warn(`[Vavoo] Ping ${url} status ${resp.status}`);
+              continue;
+          }
+          const data = await resp.json();
+          const sig = data?.addonSig || data?.mhub;
+          if (sig) {
+              return clientIp ? rewriteAddonSigIp(sig, clientIp) : sig;
+          }
+          console.warn(`[Vavoo] No addonSig received from ${url}`);
+      } catch (e) {
+          console.warn(`[Vavoo] Ping ${url} failed: ${e.message}`);
+      }
+  }
+  return null;
+}
+
 class VavooExtractor {
   _normalizeUrl(url) {
       if (url.includes('/watch')) {
@@ -97,36 +198,58 @@ class VavooExtractor {
       return url;
   }
 
-  async resolveStream(vavooUrl) {
+  async _fetchAddonSig(clientIp) {
+      return fetchAddonSig(clientIp);
+  }
+
+  async resolveStream(vavooUrl, clientIp) {
       const normalizedUrl = this._normalizeUrl(vavooUrl);
-      const resolvePayload = { language: "de", region: "DE", url: normalizedUrl };
-      const resolveHeaders = {
-          "Origin": "https://vavoo.to",
-          "Referer": "https://vavoo.to/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-          "Accept": "application/json",
-          "Content-Type": "application/json; charset=utf-8",
-      };
-      const response = await fetch("https://vavoo.to/mediahubmx-resolve.json", {
-          method: "POST",
-          headers: resolveHeaders,
-          body: JSON.stringify(resolvePayload)
-      });
-      if (!response.ok) throw new ExtractorError(`Vavoo Resolve API failed: ${response.status}`);
-      const result = await response.json();
-      let streamUrl;
-      if (Array.isArray(result)) {
-          const httpsStream = result.find(item => item.url && item.url.startsWith('https://'));
-          streamUrl = httpsStream ? httpsStream.url : result[0]?.url;
-      } else {
-          streamUrl = result?.url;
+      let sig = await this._fetchAddonSig(clientIp);
+      if (!sig) console.warn('[Vavoo] No addonSig available, resolving without signature');
+      const resolvePayload = { language: VAVOO_LANGUAGE, region: VAVOO_REGION, url: normalizedUrl, clientVersion: "3.0.2" };
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+          const resolveHeaders = {
+              "Origin": "https://vavoo.to",
+              "Referer": "https://vavoo.to/",
+              "User-Agent": "MediaHubMX/2",
+              "Accept": "*/*",
+              "Content-Type": "application/json; charset=utf-8",
+              "Accept-Language": VAVOO_LANGUAGE,
+          };
+          if (sig) resolveHeaders["mediahubmx-signature"] = sig;
+
+          const response = await fetch(`${BASE_SITES[attempt]}/mediahubmx-resolve.json`, {
+              method: "POST",
+              headers: resolveHeaders,
+              body: JSON.stringify(resolvePayload)
+          });
+          if (response.status === 451 || response.status === 502) {
+              console.warn(`[Vavoo] Resolve status ${response.status} on base ${BASE_SITES[attempt]}, retrying...`);
+              if (attempt === 0) {
+                  const fresh = await this._fetchAddonSig(clientIp);
+                  if (fresh) sig = fresh;
+                  continue;
+              }
+          }
+          if (!response.ok) throw new ExtractorError(`Vavoo Resolve API failed: ${response.status}`);
+          const result = await response.json();
+          let streamUrl;
+          if (Array.isArray(result)) {
+              const httpsStream = result.find(item => item.url && item.url.startsWith('https://'));
+              streamUrl = httpsStream ? httpsStream.url : result[0]?.url;
+          } else {
+              streamUrl = result?.url;
+          }
+          if (!streamUrl) throw new ExtractorError('Vavoo resolve response contains no valid stream URL.');
+          return streamUrl;
       }
-      if (!streamUrl) throw new ExtractorError('Vavoo resolve response contains no valid stream URL.');
-      return streamUrl;
+      throw new ExtractorError('Vavoo Resolve API failed after retries.');
   }
 
   async handle(url, request) {
-      const streamUrl = await this.resolveStream(url);
+      const clientIp = getClientIP(request);
+      const streamUrl = await this.resolveStream(url, clientIp);
       const finalUrl = streamUrl.replace(/^https:\/\//, 'http://');
       return new Response(null, {
           status: 302,
@@ -219,7 +342,7 @@ function handleInfoPage(request) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>?? Vavoo Stream Extractor</title>
+  <title>Vavoo Stream Extractor</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
       :root {
@@ -247,7 +370,7 @@ function handleInfoPage(request) {
 <body>
   <div class="container">
       <header class="header">
-          <h1>?? Vavoo Stream Extractor</h1>
+          <h1>Vavoo Stream Extractor</h1>
           <div class="version-badge">
               <span>v1.0</span>
               <span class="status-badge">ONLINE</span>
@@ -261,7 +384,7 @@ function handleInfoPage(request) {
               <h3 class="card-title">Estrazione Stream</h3>
               <p class="card-description">
                   Fornisci un URL Vavoo per ottenere un redirect (302) diretto allo stream finale.<br>
-                  <span class="warning">?? Nota:</span> Se gli stream non partono, disattiva IPv6 sulla tua connessione.
+                  <span class="warning">Nota:</span> Se gli stream non partono, disattiva IPv6 sulla tua connessione.
               </p>
               <div class="endpoint-code">${workerDomain}/manifest.m3u8?url=&lt;VAVOO_URL&gt;</div>
           </div>
